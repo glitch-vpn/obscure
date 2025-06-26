@@ -1,4 +1,4 @@
-# Obscure - Real-time VPN Log Anonymizer
+# Obscure - Real-time Log Anonymizer
 
 High-performance log anonymization daemon for VPN infrastructure. Processes logs in real-time using FIFO pipes without storing original data on disk.
 
