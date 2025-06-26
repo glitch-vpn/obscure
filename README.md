@@ -124,8 +124,7 @@ For JSON log processing with field-based anonymization:
   "type": "manual",
   "format": "json",
   "anonymize_fields": ["username", "email", "name"],
-  "salt_fields": ["ip", "key", "token"],
-  "secure_fields": ["password", "secret"]
+  "salt_fields": ["ip", "key", "token"]
 }
 ```
 
@@ -136,7 +135,6 @@ For JSON log processing with field-based anonymization:
 **JSON Field Configuration:**
 - `anonymize_fields` - Field substrings to replace with `[REDACTED]`
 - `salt_fields` - Field substrings to hash with salt
-- `secure_fields` - Legacy field (applies both anonymize and salt)
 
 ## Template Functions
 

@@ -36,4 +36,4 @@
       "salt_fields": ["name", "ip"]
     }
   ]
-} 
+}
