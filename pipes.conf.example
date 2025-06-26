@@ -1,0 +1,31 @@
+{
+  "pipes": [
+    {
+      "input": "/var/log/nginx/access.fifo",
+      "output": "/var/log/vpn-anonymized/nginx_access.log",
+      "type": "nginx-access"
+    },
+    {
+      "input": "/var/log/nginx/stream.fifo", 
+      "output": "/var/log/vpn-anonymized/nginx_stream.log",
+      "type": "nginx-stream"
+    },
+    {
+      "input": "/var/log/xray/access.fifo",
+      "output": "/var/log/vpn-anonymized/xray_access.log", 
+      "type": "xray"
+    },
+    {
+      "input": "/var/log/openvpn/access.fifo",
+      "output": "/var/log/vpn-anonymized/openvpn_access.log",
+      "type": "openvpn"
+    },
+    {
+      "input": "/var/log/custom/app.fifo",
+      "output": "/var/log/vpn-anonymized/custom_app.log",
+      "type": "manual",
+      "input_template": "(?P<ip>\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}) (?P<timestamp>\\[\\d{2}/\\w{3}/\\d{4}:\\d{2}:\\d{2}:\\d{2} [+-]\\d{4}\\]) (?P<request>\"[^\"]+\") (?P<status>\\d{3}) (?P<size>\\d+)",
+      "output_template": "{{salt .ip}} {{anonymize .timestamp}} {{.request}} {{.status}} {{.size}}"
+    }
+  ]
+} 

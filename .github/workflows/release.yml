@@ -1,0 +1,106 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Get version from tag
+      id: get_version
+      run: |
+        VERSION=${GITHUB_REF_NAME#v}
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "TAG=$GITHUB_REF_NAME" >> $GITHUB_ENV
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run tests
+      run: go test ./...
+
+    - name: Build binary for linux/amd64
+      env:
+        GOOS: linux
+        GOARCH: amd64
+        CGO_ENABLED: 0
+      run: |
+        COMMIT=$(git rev-parse --short HEAD)
+        BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S')
+        BUILDER="github-actions@${{ runner.os }}"
+        ARTIFACT_NAME="obscure_v${{ env.VERSION }}_${GOOS}_${GOARCH}"
+        echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+        go build -o $ARTIFACT_NAME \
+          -ldflags "-s -w -X main.serviceName=Obscure -X main.version=${{ env.VERSION }} -X main.commit=${COMMIT} -X 'main.buildTime=${BUILD_TIME}' -X 'main.builder=${BUILDER}'" \
+          .
+
+        tar -czf $ARTIFACT_NAME.tar.gz $ARTIFACT_NAME
+
+    - name: Generate checksums
+      run: |
+        sha256sum ${{ env.ARTIFACT_NAME }}.tar.gz > checksums.txt
+        sha256sum ${{ env.ARTIFACT_NAME }} >> checksums.txt
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ env.TAG }}
+        name: Release ${{ env.TAG }}
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        files: |
+          ${{ env.ARTIFACT_NAME }}.tar.gz
+          ${{ env.ARTIFACT_NAME }}
+          checksums.txt
+        body: |
+          ## Release ${{ env.TAG }}
+          
+          ### Downloads
+          - **Linux AMD64**: `${{ env.ARTIFACT_NAME }}.tar.gz`
+          - **Binary only**: `${{ env.ARTIFACT_NAME }}`
+          
+          ### Verification
+          ```bash
+          sha256sum -c checksums.txt
+          ```
+          
+          ### Installation
+          ```bash
+          # Download and extract
+          wget https://github.com/${{ github.repository }}/releases/download/${{ env.TAG }}/${{ env.ARTIFACT_NAME }}.tar.gz
+          tar -xzf ${{ env.ARTIFACT_NAME }}.tar.gz
+          
+          # Make executable and run
+          chmod +x ${{ env.ARTIFACT_NAME }}
+          ./${{ env.ARTIFACT_NAME }}
+          ```
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

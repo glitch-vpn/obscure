@@ -1,92 +1,245 @@
-# Privacy Log Processor
+# Obscure - Real-time VPN Log Anonymizer
 
-High-performance VPN log anonymization tool written in Go.
+High-performance log anonymization daemon for VPN infrastructure. Processes logs in real-time using FIFO pipes without storing original data on disk.
 
 ## Features
 
-- **Multi-protocol support**: nginx, Xray, WireGuard, AmneziaWG, OpenVPN
-- **High performance**: 50-100 MB/s throughput with parallel processing
-- **Privacy-first**: IP hashing, timestamp anonymization, credential removal
-- **Zero memory leaks**: Optimized buffering and goroutine management
-- **Configurable**: Multiple anonymization levels (low, medium, high)
+- **Real-time processing** via FIFO pipes (50-100 MB/s throughput)
+- **Zero disk storage** of original logs
+- **Multi-protocol support**: Nginx, Xray, OpenVPN, WireGuard, AmneziaWG
+- **Custom log formats** with regex templates
+- **IP address hashing** with salt (IPv4/IPv6 detection)
+- **Configurable anonymization levels** (low/medium/high)
+- **Concurrent processing** with automatic FIFO management
+
+## Quick Start
+
+### 1. Setup
+```bash
+sudo obscure setup
+```
+
+Creates default configuration and FIFO pipes:
+- `/var/log/nginx/access.fifo` → `/var/log/vpn-anonymized/nginx_access.log`
+- `/var/log/xray/access.fifo` → `/var/log/vpn-anonymized/xray_access.log`
+- `/var/log/openvpn/access.fifo` → `/var/log/vpn-anonymized/openvpn_access.log`
+
+### 2. Configure Services
+Update your VPN services to write to FIFO pipes:
+
+**Nginx** (`/etc/nginx/nginx.conf`):
+```nginx
+access_log /var/log/nginx/access.fifo;
+```
+
+**Xray** (`/usr/local/etc/xray/config.json`):
+```json
+{
+  "log": {
+    "access": "/var/log/xray/access.fifo"
+  }
+}
+```
+
+### 3. Start Daemon
+```bash
+sudo obscure start
+```
+
+## CLI Reference
+
+```
+obscure [COMMAND] [OPTIONS]
+
+Commands:
+  setup                    Setup FIFOs and config, then exit
+    Options:
+      --config, -c [path]    Path to config file (default: /etc/obscure/pipes.conf)
+      --salt, -s [string]    Salt for hashing
+
+  start                    Start log processing daemon
+    Options:
+      --config, -c [path]    Path to config file (default: /etc/obscure/pipes.conf)
+      --salt, -s [string]    Salt for hashing
+      --daemon, -d           Start process as daemon (default: true)
+      --level, -l [level]    Anonymization level: low, medium, high (default: high)
+```
+
+## Configuration
+
+Example `pipes.conf`:
+```json
+{
+  "pipes": [
+    {
+      "input": "/var/log/nginx/access.fifo",
+      "output": "/var/log/vpn-anonymized/nginx_access.log",
+      "type": "nginx-access"
+    },
+    {
+      "input": "/var/log/custom/app.fifo",
+      "output": "/var/log/vpn-anonymized/app.log",
+      "type": "manual",
+      "input_template": "{\"user\":\\s?\"(?P<username>[a-zA-Z_0-9]+)\"\\s?}",
+      "output_template": "user: {{salt .username}}"
+    }
+  ]
+}
+```
 
 ## Supported Log Types
 
-| Protocol | Log Type | Features |
-|----------|----------|----------|
-| nginx | `nginx-access` | IP, User-Agent, Referer anonymization |
-| nginx | `nginx-stream` | SNI hiding, IP hashing |
-| Xray | `xray` | UUID, REALITY keys, Shadowsocks credentials |
-| WireGuard | `wireguard` | Peer keys, interface names |
-| AmneziaWG | `amneziawg` | Obfuscation parameters, peer keys |
-| OpenVPN | `openvpn` | Certificate names, client IPs |
+### Built-in Types
+- `nginx-access` - Nginx access logs
+- `nginx-stream` - Nginx stream logs  
+- `xray` - Xray proxy logs
+- `openvpn` - OpenVPN logs
+- `wireguard` - WireGuard logs
+- `amneziawg` - AmneziaWG logs
+
+### Manual Type
+For custom log formats using regex templates:
+
+```json
+{
+  "type": "manual",
+  "input_template": "(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+) (?P<user>\\w+)",
+  "output_template": "{{salt .ip}} {{anonymize .user}}"
+}
+```
+
+## Template Functions
+
+- `{{salt .field}}` - Hash field with salt (returns raw hex)
+- `{{anonymize .field}}` - Replace with `[HIDDEN]`
+- `{{.field}}` - Keep field unchanged
+
+## Anonymization Examples
+
+### IP Addresses
+```
+192.168.1.100 → [IPv4:f9927a12318f]
+2001:db8::1   → [IPv6:a8b3c2d1e4f5]
+```
+
+### Nginx Access Log
+```
+# Original
+192.168.1.100 [25/Dec/2024:15:30:45 +0000] "GET /api/users?id=123 HTTP/1.1" 200 1234 "https://evil.com" "Mozilla/5.0"
+
+# Anonymized (high level)
+[IPv4:f9927a12318f] [ANONYMIZED_TIME] "GET /api/users?[PARAM]=[REDACTED] HTTP/1.1" 200 1234 "[REDACTED]" "[REDACTED]"
+```
+
+### Xray Log
+```
+# Original  
+2024/12/25 15:30:45 [Info] VLESS user: john@evil.com from 192.168.1.100:54321
+
+# Anonymized
+[ANONYMIZED_TIME] [Info] VLESS user: [user_REDACTED] from [IPv4:f9927a12318f]:54321
+```
+
+### Custom Template
+```
+# Input
+{"username": "alice"}
+
+# Template
+"input_template": "{\"username\":\\s?\"(?P<username>[a-zA-Z_0-9]+)\"\\s?}",
+"output_template": "user: {{salt .username}}"
+
+# Output
+user: b794385f2d1e
+```
 
 ## Performance
 
-- **Throughput**: 50-100 MB/s on modern servers
-- **Concurrency**: Automatic multi-core utilization
-- **Memory**: Minimal footprint with streaming processing
-- **Caching**: IP hash caching for repeated anonymization
+Benchmarks on Intel i7-13650HX:
+- **IP hashing**: 88M ops/sec (13.47 ns/op, 0 allocs)
+- **Nginx processing**: 302k lines/sec (4.1 μs/line)
+- **Manual templates**: 372k lines/sec (2.95 μs/line)
 
-## Usage
+Real-world throughput: **50-100 MB/s** for mixed log processing.
 
+## Security Features
+
+- **Salted hashing** prevents rainbow table attacks
+- **No original data storage** on disk
+- **Configurable anonymization levels**:
+  - `low` - Keep timestamps, anonymize IPs/users
+  - `medium` - Anonymize timestamps to hour precision
+  - `high` - Full timestamp anonymization
+- **Localhost preservation** (127.0.0.1, ::1 unchanged)
+
+## Installation
+
+### From Source
 ```bash
-# Basic usage
-./privacy_log_processor -input /var/log/nginx/access.log -type nginx-access -salt "your-salt" -level high
-
-# With output file
-./privacy_log_processor -input /var/log/xray/access.log -output /tmp/anonymized.log -type xray -salt "secret" -level medium
-
-# Benchmark mode
-./privacy_log_processor -benchmark
+git clone <repository>
+cd privacy_log_processor
+go build -o obscure .
+sudo cp obscure /usr/local/bin/
 ```
 
-## Anonymization Levels
+### Systemd Service
+```ini
+[Unit]
+Description=Obscure VPN Log Anonymizer
+After=network.target
 
-- **low**: Keep timestamps, anonymize IPs only
-- **medium**: Anonymize IPs and round timestamps
-- **high**: Full anonymization (default)
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/obscure start
+Restart=always
+RestartSec=5
 
-## Build
+[Install]
+WantedBy=multi-user.target
+```
 
+## Troubleshooting
+
+### FIFO Issues
 ```bash
-go build -o privacy_log_processor main.go
+# Check FIFO exists
+ls -la /var/log/nginx/access.fifo
+
+# Test FIFO manually
+echo "test log line" > /var/log/nginx/access.fifo
 ```
 
-## Cross-compilation
-
+### Permission Issues
 ```bash
-# Linux AMD64
-GOOS=linux GOARCH=amd64 go build -o privacy_log_processor-linux-amd64 main.go
-
-# Linux ARM64
-GOOS=linux GOARCH=arm64 go build -o privacy_log_processor-linux-arm64 main.go
+# Ensure proper permissions
+sudo chown root:root /usr/local/bin/obscure
+sudo chmod 755 /usr/local/bin/obscure
+sudo mkdir -p /var/log/vpn-anonymized
+sudo chmod 755 /var/log/vpn-anonymized
 ```
 
-## Examples
-
-### Nginx Access Log
-**Before:**
-```
-192.168.1.100 [25/Dec/2024:15:30:45] "GET /secret?user=john HTTP/1.1" 200 1234 "https://evil.com" "Mozilla/5.0"
+### Debug Mode
+```bash
+# Run with verbose logging
+obscure start --level low
 ```
 
-**After:**
-```
-[IPv4:a1b2c3d4e5f6] [ANONYMIZED_TIME] "GET /secret?[PARAM]=[REDACTED] HTTP/1.1" 200 1234 "[REDACTED]" "[REDACTED]"
-```
+## Architecture
 
-### Xray VLESS Log
-**Before:**
 ```
-2024/12/25 15:30:45 [Info] VLESS user: 12345678-1234-1234-1234-123456789abc from 192.168.1.100:54321
-```
-
-**After:**
-```
-[ANONYMIZED_TIME] [Info] VLESS user: [UUID_REDACTED] from [IPv4:a1b2c3d4e5f6]:54321
+┌─────────────┐    FIFO     ┌─────────────┐    File    ┌─────────────┐
+│   Service   │ ──────────> │   Obscure   │ ─────────> │ Anonymized  │
+│ (Nginx/etc) │             │   Daemon    │            │    Logs     │
+└─────────────┘             └─────────────┘            └─────────────┘
+                                   │
+                                   ▼
+                            ┌─────────────┐
+                            │ Config File │
+                            │ pipes.conf  │
+                            └─────────────┘
 ```
 
 ## License
 
-MIT License # obscure
+[Your License Here]
