@@ -112,14 +112,26 @@ func TestLogProcessor_processXrayLog(t *testing.T) {
 		{
 			name:        "xray log with UUID and IP",
 			input:       `2024/12/25 15:30:45 [Info] VLESS user: 12345678-1234-1234-1234-123456789abc from 192.168.1.100:54321`,
-			contains:    []string{"[user_REDACTED]", "[IPv4:", ":54321"},
-			notContains: []string{"12345678-1234-1234-1234-123456789abc", "192.168.1.100"},
+			contains:    []string{"[user_REDACTED]", "[IPv4:", "[PORT_REDACTED]"},
+			notContains: []string{"12345678-1234-1234-1234-123456789abc", "192.168.1.100", ":54321"},
 		},
 		{
 			name:        "xray log with timestamp anonymization",
 			input:       `2024/12/25 15:30:45 [Warning] Connection failed`,
 			contains:    []string{"[ANONYMIZED_TIME]", "[Warning]"},
 			notContains: []string{"2024/12/25 15:30:45"},
+		},
+		{
+			name:        "xray log with domains and localhost",
+			input:       `2025/06/26 11:48:35.654751 from 127.0.0.1:58002 accepted //www.google.com:443 [http_proxy -> direct]`,
+			contains:    []string{"[ANONYMIZED_TIME]", "[IPv4:", "[PORT_REDACTED]", "//[DOMAIN_REDACTED]:443", "[http_proxy -> direct]"},
+			notContains: []string{"2025/06/26", "127.0.0.1", ":58002", "www.google.com"},
+		},
+		{
+			name:        "xray log with tcp domain",
+			input:       `2025/06/26 11:29:32.171161 from [IPv4:502c95cb312b]:15250 accepted tcp:api2.cursor.sh:443 [vless_reality -> direct] email: [REDACTED]`,
+			contains:    []string{"[ANONYMIZED_TIME]", "[IPv4:502c95cb312b]", "[PORT_REDACTED]", "tcp:[DOMAIN_REDACTED]:443", "[vless_reality -> direct]"},
+			notContains: []string{"2025/06/26", ":15250", "api2.cursor.sh"},
 		},
 	}
 
@@ -880,5 +892,58 @@ func BenchmarkLogProcessor_processJSONLog(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		processor.processJSONLog(jsonLine, anonymizeFields, saltFields)
+	}
+}
+
+func TestLogProcessor_forceHashIP(t *testing.T) {
+	processor := NewLogProcessor("test-salt", "high")
+
+	tests := []struct {
+		name     string
+		ip       string
+		expected string
+	}{
+		{
+			name:     "IPv4 address",
+			ip:       "192.168.1.100",
+			expected: "[IPv4:",
+		},
+		{
+			name:     "IPv6 address",
+			ip:       "2001:db8::1",
+			expected: "[IPv6:",
+		},
+		{
+			name:     "localhost IPv4 gets hashed",
+			ip:       "127.0.0.1",
+			expected: "[IPv4:",
+		},
+		{
+			name:     "localhost IPv6 gets hashed",
+			ip:       "::1",
+			expected: "[IPv6:",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := processor.forceHashIP(tt.ip)
+			if !strings.HasPrefix(result, tt.expected) {
+				t.Errorf("forceHashIP() = %v, want prefix %v", result, tt.expected)
+			}
+
+			// Test consistency - same input should give same output
+			result2 := processor.forceHashIP(tt.ip)
+			if result != result2 {
+				t.Errorf("forceHashIP() not consistent: %v != %v", result, result2)
+			}
+
+			// Verify localhost IPs are NOT preserved (different from hashIP)
+			if tt.ip == "127.0.0.1" || tt.ip == "::1" {
+				if result == tt.ip {
+					t.Errorf("forceHashIP() should hash localhost %v, but got %v", tt.ip, result)
+				}
+			}
+		})
 	}
 }

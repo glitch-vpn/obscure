@@ -57,7 +57,7 @@ func NewLogProcessor(salt string, level string) *LogProcessor {
 
 	processor.timestampPatterns = map[string]*regexp.Regexp{
 		"nginx":   regexp.MustCompile(`\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2}`),
-		"xray":    regexp.MustCompile(`\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}`),
+		"xray":    regexp.MustCompile(`\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?`),
 		"systemd": regexp.MustCompile(`\w{3} \d{1,2} \d{2}:\d{2}:\d{2}`),
 	}
 
@@ -115,6 +115,43 @@ func (p *LogProcessor) hashIP(ip string) string {
 	return result
 }
 
+func (p *LogProcessor) forceHashIP(ip string) string {
+	// Force hash ALL IPs including localhost (for Xray logs where we want full anonymization)
+	cacheKey := "force_" + ip
+
+	// Check cache first
+	p.cacheMutex.RLock()
+	if cached, exists := p.ipHashCache[cacheKey]; exists {
+		p.cacheMutex.RUnlock()
+		return cached
+	}
+	p.cacheMutex.RUnlock()
+
+	// Generate hash
+	hasher := sha256.New()
+	hasher.Write([]byte(ip))
+	hasher.Write(p.salt)
+	hashBytes := hasher.Sum(nil)
+	shortHash := hex.EncodeToString(hashBytes)[:12]
+
+	// Determine IP type and format result with type info
+	var result string
+	if strings.Contains(ip, ":") {
+		// IPv6 address
+		result = fmt.Sprintf("[IPv6:%s]", shortHash)
+	} else {
+		// IPv4 address
+		result = fmt.Sprintf("[IPv4:%s]", shortHash)
+	}
+
+	// Cache the result
+	p.cacheMutex.Lock()
+	p.ipHashCache[cacheKey] = result
+	p.cacheMutex.Unlock()
+
+	return result
+}
+
 func (p *LogProcessor) anonymizeTimestamp(timestamp, format string) string {
 	if p.anonymizeLevel == "low" {
 		return timestamp
@@ -162,14 +199,34 @@ func (p *LogProcessor) processNginxStreamLog(line string) string {
 }
 
 func (p *LogProcessor) processXrayLog(line string) string {
-	// Anonymize timestamps
+	// Anonymize timestamps with milliseconds
 	if p.anonymizeLevel != "low" {
 		line = p.timestampPatterns["xray"].ReplaceAllString(line, "[ANONYMIZED_TIME]")
 	}
 
-	// Anonymize IPs
-	line = p.ipv4Pattern.ReplaceAllStringFunc(line, p.hashIP)
-	line = p.ipv6Pattern.ReplaceAllStringFunc(line, p.hashIP)
+	// Force anonymize ALL IPs including localhost (critical for Xray privacy)
+	line = p.ipv4Pattern.ReplaceAllStringFunc(line, p.forceHashIP)
+	line = p.ipv6Pattern.ReplaceAllStringFunc(line, p.forceHashIP)
+
+	// Anonymize domain names and hostnames
+	domainPattern := regexp.MustCompile(`//([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})`)
+	line = domainPattern.ReplaceAllString(line, "//[DOMAIN_REDACTED]")
+
+	// Alternative domain pattern for tcp: connections
+	tcpDomainPattern := regexp.MustCompile(`tcp:([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})`)
+	line = tcpDomainPattern.ReplaceAllString(line, "tcp:[DOMAIN_REDACTED]")
+
+	// Anonymize port numbers (keep some common ones for analysis)
+	portPattern := regexp.MustCompile(`:(\d{4,5})\b`)
+	line = portPattern.ReplaceAllStringFunc(line, func(match string) string {
+		port := strings.TrimPrefix(match, ":")
+		switch port {
+		case "80", "443", "22", "21", "25", "53", "110", "143", "993", "995":
+			return match // Keep common ports
+		default:
+			return ":[PORT_REDACTED]"
+		}
+	})
 
 	// Anonymize UUIDs
 	line = p.uuidPattern.ReplaceAllString(line, "[UUID_REDACTED]")
