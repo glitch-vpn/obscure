@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -672,5 +673,212 @@ func TestLogProcessor_anonymizationLevelDifferences(t *testing.T) {
 
 	if lowIP != highIP {
 		t.Errorf("IP hashing should be consistent across levels: %s != %s", lowIP, highIP)
+	}
+}
+
+func TestLogProcessor_processJSONLog(t *testing.T) {
+	processor := NewLogProcessor("test-salt", "high")
+
+	tests := []struct {
+		name            string
+		input           string
+		anonymizeFields []string
+		saltFields      []string
+		contains        []string
+		notContains     []string
+	}{
+		{
+			name:            "simple JSON with username anonymization",
+			input:           `{"username": "alice", "action": "login", "ip": "192.168.1.100"}`,
+			anonymizeFields: []string{"username"},
+			saltFields:      []string{"ip"},
+			contains:        []string{`"username":"[REDACTED]"`, `"action":"login"`, `[IPv4:`},
+			notContains:     []string{"alice", "192.168.1.100"},
+		},
+		{
+			name:            "nested JSON with secure fields",
+			input:           `{"user": {"name": "bob", "key": "secret123"}, "metadata": {"ip_address": "10.0.0.1"}}`,
+			anonymizeFields: []string{"name"},
+			saltFields:      []string{"key", "ip"},
+			contains:        []string{`"name":"[REDACTED]"`, `[IPv4:`},
+			notContains:     []string{"bob", "secret123", "10.0.0.1"},
+		},
+		{
+			name:            "invalid JSON returns original",
+			input:           `{invalid json}`,
+			anonymizeFields: []string{"username"},
+			saltFields:      []string{"ip"},
+			contains:        []string{"{invalid json}"},
+			notContains:     []string{},
+		},
+		{
+			name:            "JSON array with nested objects",
+			input:           `{"users": [{"username": "alice", "pass": "secret"}, {"username": "bob", "pass": "hidden"}]}`,
+			anonymizeFields: []string{"username"},
+			saltFields:      []string{"pass"},
+			contains:        []string{`"username":"[REDACTED]"`},
+			notContains:     []string{"alice", "bob", "secret", "hidden"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := processor.processJSONLog(tt.input, tt.anonymizeFields, tt.saltFields)
+
+			for _, want := range tt.contains {
+				if !strings.Contains(result, want) {
+					t.Errorf("processJSONLog() result should contain %q, got %v", want, result)
+				}
+			}
+
+			for _, notWant := range tt.notContains {
+				if strings.Contains(result, notWant) {
+					t.Errorf("processJSONLog() result should not contain %q, got %v", notWant, result)
+				}
+			}
+		})
+	}
+}
+
+func TestLogProcessor_processJSONKeys(t *testing.T) {
+	processor := NewLogProcessor("test-salt", "high")
+
+	tests := []struct {
+		name            string
+		data            map[string]interface{}
+		anonymizeFields []string
+		saltFields      []string
+		expectAnonymize []string
+		expectSalt      []string
+	}{
+		{
+			name: "case insensitive matching",
+			data: map[string]interface{}{
+				"USERNAME":  "alice",
+				"UserEmail": "alice@test.com",
+				"client_ip": "192.168.1.1",
+			},
+			anonymizeFields: []string{"user"},
+			saltFields:      []string{"ip"},
+			expectAnonymize: []string{"USERNAME", "UserEmail"},
+			expectSalt:      []string{"client_ip"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalData := make(map[string]interface{})
+			for k, v := range tt.data {
+				originalData[k] = v
+			}
+
+			processor.processJSONKeys(tt.data, tt.anonymizeFields, tt.saltFields)
+
+			// Check anonymized fields
+			for _, field := range tt.expectAnonymize {
+				if value, ok := tt.data[field]; ok {
+					if value != "[REDACTED]" {
+						t.Errorf("Field %s should be anonymized to [REDACTED], got %v", field, value)
+					}
+				}
+			}
+
+			// Check salted fields
+			for _, field := range tt.expectSalt {
+				if value, ok := tt.data[field]; ok {
+					originalValue := originalData[field].(string)
+					if value == originalValue {
+						t.Errorf("Field %s should be salted/hashed, but remained unchanged: %v", field, value)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestLogProcessor_hashValue(t *testing.T) {
+	processor := NewLogProcessor("test-salt", "high")
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"simple string", "hello"},
+		{"complex string", "complex_password_123"},
+		{"empty string", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := processor.hashValue(tt.input)
+
+			// Check that result is a 12-character hex string
+			if len(result) != 12 {
+				t.Errorf("hashValue() should return 12 character string, got %d: %s", len(result), result)
+			}
+
+			// Check that it's consistent
+			result2 := processor.hashValue(tt.input)
+			if result != result2 {
+				t.Errorf("hashValue() not consistent: %v != %v", result, result2)
+			}
+
+			// Check that different inputs give different outputs (unless empty)
+			if tt.input != "" {
+				differentResult := processor.hashValue(tt.input + "_different")
+				if result == differentResult {
+					t.Errorf("hashValue() should give different results for different inputs")
+				}
+			}
+		})
+	}
+}
+
+func TestPipeConfig_JSONFormat(t *testing.T) {
+	// Test config parsing with new fields
+	configJSON := `{
+		"pipes": [
+			{
+				"input": "/test/input.fifo",
+				"output": "/test/output.log", 
+				"type": "manual",
+				"format": "json",
+				"anonymize_fields": ["user", "email"],
+				"salt_fields": ["ip", "key"]
+			}
+		]
+	}`
+
+	var config DaemonConfig
+	err := json.Unmarshal([]byte(configJSON), &config)
+	if err != nil {
+		t.Fatalf("Failed to parse config: %v", err)
+	}
+
+	pipe := config.Pipes[0]
+	if pipe.Format != "json" {
+		t.Errorf("Expected format 'json', got '%s'", pipe.Format)
+	}
+
+	expectedAnonymize := []string{"user", "email"}
+	if !reflect.DeepEqual(pipe.AnonymizeFields, expectedAnonymize) {
+		t.Errorf("Expected anonymize_fields %v, got %v", expectedAnonymize, pipe.AnonymizeFields)
+	}
+
+	expectedSalt := []string{"ip", "key"}
+	if !reflect.DeepEqual(pipe.SaltFields, expectedSalt) {
+		t.Errorf("Expected salt_fields %v, got %v", expectedSalt, pipe.SaltFields)
+	}
+}
+
+func BenchmarkLogProcessor_processJSONLog(b *testing.B) {
+	processor := NewLogProcessor("test-salt", "high")
+	jsonLine := `{"username": "alice", "action": "login", "ip": "192.168.1.100", "timestamp": "2024-01-01T12:00:00Z", "user_agent": "Mozilla/5.0"}`
+	anonymizeFields := []string{"username", "user"}
+	saltFields := []string{"ip"}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		processor.processJSONLog(jsonLine, anonymizeFields, saltFields)
 	}
 }

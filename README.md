@@ -82,6 +82,14 @@ Example `pipes.conf`:
       "type": "manual",
       "input_template": "{\"user\":\\s?\"(?P<username>[a-zA-Z_0-9]+)\"\\s?}",
       "output_template": "user: {{salt .username}}"
+    },
+    {
+      "input": "/var/log/json/app.fifo",
+      "output": "/var/log/vpn-anonymized/json_app.log",
+      "type": "manual",
+      "format": "json",
+      "anonymize_fields": ["username", "email", "name", "password", "secret"],
+      "salt_fields": ["ip", "key", "token"]
     }
   ]
 }
@@ -107,6 +115,28 @@ For custom log formats using regex templates:
   "output_template": "{{salt .ip}} {{anonymize .user}}"
 }
 ```
+
+### JSON Format
+For JSON log processing with field-based anonymization:
+
+```json
+{
+  "type": "manual",
+  "format": "json",
+  "anonymize_fields": ["username", "email", "name"],
+  "salt_fields": ["ip", "key", "token"],
+  "secure_fields": ["password", "secret"]
+}
+```
+
+**Format Options:**
+- `"plain"` (default) - Uses existing text processing
+- `"json"` - Parses JSON and processes fields by substring matching
+
+**JSON Field Configuration:**
+- `anonymize_fields` - Field substrings to replace with `[REDACTED]`
+- `salt_fields` - Field substrings to hash with salt
+- `secure_fields` - Legacy field (applies both anonymize and salt)
 
 ## Template Functions
 
@@ -153,6 +183,20 @@ For custom log formats using regex templates:
 user: b794385f2d1e
 ```
 
+### JSON Processing
+```
+# Input JSON
+{"username": "alice", "password": "secret123", "client_ip": "192.168.1.100", "action": "login"}
+
+# Configuration
+"format": "json",
+"anonymize_fields": ["username", "pass"],
+"salt_fields": ["ip"]
+
+# Output JSON
+{"username":"[REDACTED]","password":"[REDACTED]","client_ip":"[IPv4:f9927a12318f]","action":"login"}
+```
+
 ## Performance
 
 Benchmarks on Intel i7-13650HX:
@@ -176,8 +220,8 @@ Real-world throughput: **50-100 MB/s** for mixed log processing.
 
 ### From Source
 ```bash
-git clone <repository>
-cd privacy_log_processor
+git clone https://github.com/glitch-vpn/obscure.git
+cd obscure
 go build -o obscure .
 sudo cp obscure /usr/local/bin/
 ```
@@ -239,7 +283,3 @@ obscure start --level low
                             │ pipes.conf  │
                             └─────────────┘
 ```
-
-## License
-
-[Your License Here]

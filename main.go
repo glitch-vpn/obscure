@@ -280,6 +280,82 @@ func (p *LogProcessor) processManualLog(line, inputTemplate, outputTemplate stri
 	return buf.String()
 }
 
+func (p *LogProcessor) processJSONLog(line string, anonymizeFields, saltFields []string) string {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(line), &data); err != nil {
+		// If not valid JSON, return original line
+		return line
+	}
+
+	// Process all keys in the JSON object
+	p.processJSONKeys(data, anonymizeFields, saltFields)
+
+	// Marshal back to JSON
+	result, err := json.Marshal(data)
+	if err != nil {
+		// If marshaling fails, return original line
+		return line
+	}
+
+	return string(result)
+}
+
+func (p *LogProcessor) processJSONKeys(data map[string]interface{}, anonymizeFields, saltFields []string) {
+	for key, value := range data {
+		switch v := value.(type) {
+		case string:
+			// Check if key contains any anonymize field substrings
+			shouldAnonymize := false
+			shouldSalt := false
+
+			for _, field := range anonymizeFields {
+				if strings.Contains(strings.ToLower(key), strings.ToLower(field)) {
+					shouldAnonymize = true
+					break
+				}
+			}
+
+			for _, field := range saltFields {
+				if strings.Contains(strings.ToLower(key), strings.ToLower(field)) {
+					shouldSalt = true
+					break
+				}
+			}
+
+			if shouldSalt {
+				// For IP fields, use hashIP function; for other fields use simple hash
+				if strings.Contains(strings.ToLower(key), "ip") {
+					data[key] = p.hashIP(v)
+				} else {
+					data[key] = p.hashValue(v)
+				}
+			} else if shouldAnonymize {
+				data[key] = "[REDACTED]"
+			}
+
+		case map[string]interface{}:
+			// Recursively process nested objects
+			p.processJSONKeys(v, anonymizeFields, saltFields)
+
+		case []interface{}:
+			// Process arrays
+			for _, item := range v {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					p.processJSONKeys(itemMap, anonymizeFields, saltFields)
+				}
+			}
+		}
+	}
+}
+
+func (p *LogProcessor) hashValue(value string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(value))
+	hasher.Write(p.salt)
+	hashBytes := hasher.Sum(nil)
+	return hex.EncodeToString(hashBytes)[:12]
+}
+
 func (p *LogProcessor) processLine(line, logType string) string {
 	switch logType {
 	case "nginx-access":
@@ -396,11 +472,14 @@ func runStartCommand() {
 }
 
 type PipeConfig struct {
-	Input          string `json:"input"`           // FIFO path
-	Output         string `json:"output"`          // Output file
-	Type           string `json:"type"`            // Log type or "manual"
-	InputTemplate  string `json:"input_template"`  // Regex pattern for manual type
-	OutputTemplate string `json:"output_template"` // Output template for manual type
+	Input           string   `json:"input"`            // FIFO path
+	Output          string   `json:"output"`           // Output file
+	Type            string   `json:"type"`             // Log type or "manual"
+	Format          string   `json:"format"`           // Format: "plain" (default) or "json"
+	InputTemplate   string   `json:"input_template"`   // Regex pattern for manual type
+	OutputTemplate  string   `json:"output_template"`  // Output template for manual type
+	AnonymizeFields []string `json:"anonymize_fields"` // JSON field substrings to anonymize
+	SaltFields      []string `json:"salt_fields"`      // JSON field substrings to salt hash
 }
 
 type DaemonConfig struct {
@@ -482,7 +561,15 @@ func processPipe(pipe PipeConfig, salt, level string) {
 			line := scanner.Text()
 			var processed string
 
-			if pipe.Type == "manual" {
+			// Determine format (default to "plain" if not specified)
+			format := pipe.Format
+			if format == "" {
+				format = "plain"
+			}
+
+			if format == "json" {
+				processed = processor.processJSONLog(line, pipe.AnonymizeFields, pipe.SaltFields)
+			} else if pipe.Type == "manual" {
 				processed = processor.processManualLog(line, pipe.InputTemplate, pipe.OutputTemplate)
 			} else {
 				processed = processor.processLine(line, pipe.Type)
